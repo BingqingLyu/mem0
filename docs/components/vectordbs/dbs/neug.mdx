@@ -1,0 +1,76 @@
+---
+title: "NeuG"
+description: "Use NeuG, a graph database engine with native HNSW vector indexes and BM25 full-text indexes, as a self-hosted vector store in Mem0."
+---
+
+NeuG is a graph database engine with native HNSW vector indexes and BM25 full-text indexes. The mem0 backend stores each collection as a NeuG node table and serves vector search, native BM25 keyword search, and graph traversal (edges between memories) from a single engine.
+
+### Usage
+
+```python
+import os
+from mem0 import Memory
+
+os.environ["OPENAI_API_KEY"] = "sk-xx"
+
+config = {
+    "vector_store": {
+        "provider": "neug",
+        "config": {
+            "collection_name": "mem0",
+            "embedding_model_dims": 1536,
+            "db_path": "/tmp/neug_mem0",
+            "distance": "cosine"
+        }
+    }
+}
+
+m = Memory.from_config(config)
+messages = [
+    {"role": "user", "content": "I'm planning to watch a movie tonight. Any recommendations?"},
+    {"role": "assistant", "content": "How about thriller movies? They can be quite engaging."},
+    {"role": "user", "content": "I'm not a big fan of thriller movies but I love sci-fi movies."},
+    {"role": "assistant", "content": "Got it! I'll avoid thriller recommendations and suggest sci-fi movies in the future."}
+]
+m.add(messages, user_id="alice", metadata={"category": "movies"})
+```
+
+### Installation
+
+NeuG is not published on PyPI. Build the `python_bind` package from your NeuG checkout so it is importable as `neug` by the interpreter running mem0. The adapter also requires the `vector_search` and `fts` engine extensions, which are loaded automatically per connection.
+
+### Config
+
+Here are the parameters available for configuring NeuG:
+
+| Parameter | Description | Default Value |
+| --- | --- | --- |
+| `collection_name` | Name of the collection (mapped to a NeuG node table) | `mem0` |
+| `embedding_model_dims` | Dimensions of the embedding model | `1536` |
+| `db_path` | Path to the NeuG database directory | `/tmp/neug_mem0` |
+| `distance` | Distance metric for HNSW similarity (`cosine` or `l2`) | `cosine` |
+
+### Search behavior
+
+Vector search uses the HNSW index by default: NeuG returns approximate nearest neighbors and mem0 re-ranks the fetched candidates client-side from the stored vectors, which keeps scores exact. Pass-through options on the store:
+
+- `search(..., exact=True)` forces an O(n) full scan that ranks correctly regardless of index staleness (useful right after bulk updates, since NeuG's HNSW index may lag behind vector updates).
+- `keyword_search` runs native BM25 over the memory text and powers mem0's hybrid retrieval.
+
+### Graph traversal
+
+Each collection also gets a relation table, so memories can be linked and traversed:
+
+```python
+store = m.vector_store
+store.add_edge(source_memory_id, target_memory_id, relation="supports")
+neighbors = store.traverse(source_memory_id, depth=2, direction="out", relation="supports")
+store.remove_edge(source_memory_id, target_memory_id)
+```
+
+Deleting a memory (`DETACH DELETE`) removes its edges as well.
+
+### Notes
+
+- Only one process may open a given `db_path` at a time; multiple mem0 stores in the same process (telemetry, entity store) safely share the handle.
+- Only `cosine` and `l2` distance metrics are supported; inner product is not usable on NeuG 0.2.0 yet.
