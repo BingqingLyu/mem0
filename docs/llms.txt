@@ -498,6 +498,7 @@ Everything below is OSS-only provider configuration. Skip this entire section wh
 - [Neptune Analytics](https://docs.mem0.ai/components/vectordbs/dbs/neptune_analytics) [OSS]: Use when the user is on AWS Neptune Analytics (graph + vector).
 - [Turbopuffer](https://docs.mem0.ai/components/vectordbs/dbs/turbopuffer) [OSS]: Use when the user is on Turbopuffer serverless.
 - [NeuG](https://docs.mem0.ai/components/vectordbs/dbs/neug) [OSS]: Use when the user wants an embedded graph engine with native HNSW vector search, BM25 keyword search, and memory graph traversal.
+- [NeuG vs. Other Backends](https://docs.mem0.ai/components/vectordbs/neug-comparison) [OSS]: Use when comparing backends on vector, full-text, and graph retrieval support.
 
 ### Rerankers [OSS]
 - [Reranker Overview](https://docs.mem0.ai/components/rerankers/overview) [OSS]: Use when the user wants to improve OSS search result quality.

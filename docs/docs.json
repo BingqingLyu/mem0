@@ -231,7 +231,8 @@
                               "components/vectordbs/dbs/turbopuffer",
                               "components/vectordbs/dbs/neug"
                             ]
-                          }
+                          },
+                          "components/vectordbs/neug-comparison"
                         ]
                       },
                       {

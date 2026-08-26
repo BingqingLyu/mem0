@@ -1,0 +1,77 @@
+---
+title: "NeuG vs. Other Backends"
+description: "How NeuG compares to mem0's existing vector store backends: vector search, full-text search, and graph traversal support per provider."
+---
+
+NeuG is the only mem0 backend that serves **vector search, native BM25 full-text search, and graph traversal from a single embedded engine**. This page compares it against the other supported backends so you can pick the right store for your workload.
+
+## Three-way retrieval support
+
+mem0's retrieval story has three parts: vector search (`search`), full-text search (`keyword_search`, used by hybrid retrieval), and graph traversal over memories. Here is what each provider supports:
+
+| Provider | Vector search | Full-text (`keyword_search`) | Graph traversal |
+| --- | :---: | :---: | :---: |
+| **neug** | ✅ | ✅ native BM25 | ✅ |
+| qdrant *(default)* | ✅ | ✅ | — |
+| pgvector | ✅ | ✅ | — |
+| milvus | ✅ | ✅ | — |
+| elasticsearch | ✅ | ✅ | — |
+| opensearch | ✅ | ✅ | — |
+| pinecone | ✅ | ✅ | — |
+| mongodb | ✅ | ✅ | — |
+| redis | ✅ | ✅ | — |
+| upstash_vector | ✅ | ✅ | — |
+| azure_ai_search | ✅ | ✅ | — |
+| azure_mysql | ✅ | ✅ | — |
+| databricks | ✅ | ✅ | — |
+| vertex_ai_vector_search | ✅ | ✅ | — |
+| weaviate | ✅ | ✅ | — |
+| baidu | ✅ | ✅ | — |
+| chroma | ✅ | — | — |
+| faiss | ✅ | — | — |
+| supabase | ✅ | — | — |
+| valkey | ✅ | — | — |
+| s3_vectors | ✅ | — | — |
+| langchain | ✅ | — | — |
+| cassandra | ✅ | — | — |
+| neptune | ✅ | — | — |
+| turbopuffer | ✅ | — | — |
+| oracledb | ✅ | — | — |
+
+Takeaways:
+
+- **Graph traversal**: no other backend exposes it at the adapter level. Neptune Analytics runs on a graph engine, but its mem0 adapter only uses it as a vector store. With NeuG, memories can be linked (`add_edge`) and walked (`traverse`) without bolting on a separate graph database.
+- **Full-text search**: 10 of the 25 existing backends do not implement `keyword_search`; mem0 then warns and silently degrades hybrid retrieval to semantic-only. NeuG provides engine-native BM25.
+- **Vector search**: every backend supports it; the differences are below.
+
+## Feature comparison
+
+| Aspect | NeuG | Existing backends (typical) |
+| --- | --- | --- |
+| Vector search | HNSW ANN, `cosine` / `l2` metrics | HNSW and more; Qdrant/pgvector also support inner product, quantization, sparse vectors |
+| Full-text search | Engine-native BM25 index | Only some providers (see matrix); ~10 of 25 have none |
+| Graph traversal | Native relation tables, `add_edge` / `traverse` / `remove_edge` | None at the vector store layer |
+| Deployment | Embedded (single directory, no server process) | Mixed: Chroma/FAISS embedded; Qdrant, pgvector, ... client-server |
+| Installation | Build `python_bind` from the NeuG checkout (not on PyPI yet) | All pip-installable with mature docs |
+| Filtering | Server-side for promoted columns, client-side otherwise | Server-side metadata filtering on most providers |
+
+## Performance comparison
+
+| Aspect | NeuG | Existing backends |
+| --- | --- | --- |
+| Query path | HNSW IndexScan with over-fetch + client-side re-rank (exact scores) | HNSW on Qdrant/pgvector; scores returned server-side |
+| Network overhead | None — in-process calls, lowest latency for single-node setups | Client-server backends pay a network round-trip per query |
+| Writes | Local, no server bottleneck | Bound by server capacity and connection pools |
+| Concurrency | Single read-write connection serialized in-process (write-heavy concurrency is the current weak spot) | Server-based backends scale horizontally with many connections |
+| Index freshness | HNSW ranking may lag right after vector updates; client-side re-rank compensates, `exact=True` forces a full scan | Updates generally visible immediately |
+
+## When to pick NeuG
+
+- You want **hybrid retrieval** (vector + BM25) and a **memory graph** without running multiple systems.
+- You deploy on a single node or at the edge and want zero network overhead.
+
+Pick an established backend instead when you need horizontal write concurrency, inner-product metrics, or a pip-installable, battle-tested stack.
+
+<Note>
+NeuG 0.2.0 caveats: one process per `db_path` and one read-write connection per database (mem0 shares the handle internally); only `cosine` and `l2` metrics are usable. See the [NeuG page](/components/vectordbs/dbs/neug) for configuration.
+</Note>
