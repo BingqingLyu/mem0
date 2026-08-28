@@ -18,24 +18,23 @@ NeuG node table plus one relation table:
 - Graph traversal uses the relation table (``add_edge``/``remove_edge``/
   ``traverse``); ``delete``/``reset`` clean edges via DETACH DELETE / DROP.
 
-Dialect notes (verified against NeuG 0.2.0 build c9a77f51):
+Dialect notes (verified against NeuG main @ 01d88ef, previously c9a77f51):
 - ``vector_search`` / ``fts`` extensions must be LOADed per connection.
 - ``conn.execute`` takes ``parameters`` as a keyword dict.
 - ``IN $list`` bound parameters and bound ``LIMIT`` are not usable, so IN is
   expanded to OR-ed equality and LIMIT is inlined as an integer literal.
-- ``DROP TABLE`` on a table that still has an HNSW index crashes the engine,
-  so indexes (and the relation table) are dropped before the node table.
+- ``DROP TABLE`` now tolerates attached HNSW indexes (fixed upstream), but
+  indexes (and the relation table) are still dropped before the node table.
 - Updates go through ``SET`` (which keeps row data and the FTS index in sync).
 - The engine allows duplicate edges between the same node pair, so
   ``add_edge`` checks for an existing edge first.
 - Performance: ``search`` uses the HNSW IndexScan plan (ORDER BY distance ASC
   LIMIT) with a bound ``$q`` query vector and over-fetching, then re-ranks
   client-side from the returned stored vectors. This is the fast ANN path; it
-  also masks two engine defects: IndexScan misreports distances for duplicate
-  vectors, and its ranking lags behind vector updates (SET/DELETE+CREATE leave
-  stale index order), since re-ranking fixes the order within the fetched
-  window. Pass ``exact=True`` to force an O(n) full scan that always ranks
-  correctly regardless of index staleness.
+  also masks an upstream defect (alibaba/neug#931): on the ANN rewrite path
+  the projected distance can be a raw index score instead of the metric's
+  distance, so client-side re-ranking is what guarantees mem0's [0, 1]
+  similarity contract. Pass ``exact=True`` to force an O(n) full scan.
 - A NeuG database directory can only be opened once per process (error 1004)
   and only supports ONE read-write connection per Database (error 4001), so
   stores on the same ``db_path`` share one Database handle and one connection

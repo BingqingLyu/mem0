@@ -63,7 +63,7 @@ Takeaways:
 | Network overhead | None — in-process calls, lowest latency for single-node setups | Client-server backends pay a network round-trip per query |
 | Writes | Local, no server bottleneck | Bound by server capacity and connection pools |
 | Concurrency | Single read-write connection serialized in-process (write-heavy concurrency is the current weak spot) | Server-based backends scale horizontally with many connections |
-| Index freshness | HNSW ranking may lag right after vector updates; client-side re-rank compensates, `exact=True` forces a full scan | Updates generally visible immediately |
+| Index freshness | Updates are reflected in HNSW ranking; client-side re-rank keeps returned scores exact against mem0's [0, 1] contract, `exact=True` forces a full scan | Updates generally visible immediately |
 
 ## When to pick NeuG
 
@@ -73,5 +73,5 @@ Takeaways:
 Pick an established backend instead when you need horizontal write concurrency, inner-product metrics, or a pip-installable, battle-tested stack.
 
 <Note>
-NeuG 0.2.0 caveats: one process per `db_path` and one read-write connection per database (mem0 shares the handle internally); only `cosine` and `l2` metrics are usable. See the [NeuG page](/components/vectordbs/dbs/neug) for configuration.
+NeuG caveats: one process per `db_path` and one read-write connection per database (mem0 shares the handle internally); the mem0 adapter supports `cosine` and `l2` metrics (NeuG itself also offers `ip`). See the [NeuG page](/components/vectordbs/dbs/neug) for configuration.
 </Note>

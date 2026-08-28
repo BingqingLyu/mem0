@@ -54,7 +54,7 @@ Here are the parameters available for configuring NeuG:
 
 Vector search uses the HNSW index by default: NeuG returns approximate nearest neighbors and mem0 re-ranks the fetched candidates client-side from the stored vectors, which keeps scores exact. Pass-through options on the store:
 
-- `search(..., exact=True)` forces an O(n) full scan that ranks correctly regardless of index staleness (useful right after bulk updates, since NeuG's HNSW index may lag behind vector updates).
+- `search(..., exact=True)` forces an O(n) full scan instead of the HNSW index (useful for small collections or when you want to bypass the ANN path entirely).
 - `keyword_search` runs native BM25 over the memory text and powers mem0's hybrid retrieval.
 
 ### Graph traversal
