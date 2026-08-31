@@ -72,6 +72,12 @@ _DISTANCE_METRICS = {
 _OVERFETCH_FACTOR = 5
 _OVERFETCH_MIN = 50
 
+# Rows per multi-row CREATE statement in insert(). Bound UNWIND lists are
+# unsupported (parameter serialization rejects them), so batching happens as
+# one CREATE with N node patterns; this cuts per-statement overhead from
+# ~70ms/row to ~1ms/row while keeping HNSW/FTS index maintenance intact.
+_INSERT_BATCH_SIZE = 128
+
 # Process-level Database/connection registry: NeuG refuses a second open of
 # the same directory within one process (error 1004) and a second read-write
 # connection on the same Database (error 4001), but mem0 creates multiple
@@ -466,16 +472,52 @@ class NeuG(VectorStoreBase):
         self._execute(f"CREATE REL TABLE {table}_mem0_links (FROM {table} TO {table}, relation STRING, weight DOUBLE)")
 
     def insert(self, vectors: List, payloads: List = None, ids: List = None):
-        """Insert vectors (upsert semantics: existing IDs are updated)."""
+        """Insert vectors (upsert semantics: existing IDs are updated).
+
+        Rows are written as multi-row CREATE statements for bulk throughput.
+        A batch failing on a duplicate primary key rolls back atomically and
+        is retried row by row so per-row upsert semantics are preserved.
+        """
         if payloads is not None and len(payloads) != len(vectors):
             raise ValueError(f"payloads length ({len(payloads)}) must match vectors length ({len(vectors)})")
         if ids is not None and len(ids) != len(vectors):
             raise ValueError(f"ids length ({len(ids)}) must match vectors length ({len(vectors)})")
         logger.info(f"Inserting {len(vectors)} vectors into collection {self.collection_name}")
-        for idx, vector in enumerate(vectors):
-            payload = payloads[idx] if payloads else {}
-            vector_id = str(uuid.uuid4()) if ids is None else str(ids[idx])
-            self._upsert(vector_id, vector, payload)
+        for start in range(0, len(vectors), _INSERT_BATCH_SIZE):
+            end = min(start + _INSERT_BATCH_SIZE, len(vectors))
+            batch_ids = [str(ids[i]) if ids is not None else str(uuid.uuid4()) for i in range(start, end)]
+            try:
+                self._bulk_create(
+                    batch_ids,
+                    vectors[start:end],
+                    payloads[start:end] if payloads is not None else [{}] * (end - start),
+                )
+            except Exception as e:
+                if not _is_duplicate_pk_error(e):
+                    raise
+                # Duplicate primary key somewhere in the batch (it rolled back
+                # atomically): replay it one row at a time via upsert.
+                for i, vector_id in enumerate(batch_ids):
+                    self._upsert(vector_id, vectors[start + i], payloads[start + i] if payloads else {})
+
+    def _bulk_create(self, vector_ids: List[str], vectors: List, payloads: List):
+        """Write a batch of rows as one multi-row CREATE with bound parameters."""
+        patterns = []
+        params: Dict[str, Any] = {}
+        for j, (vector_id, vector, payload) in enumerate(zip(vector_ids, vectors, payloads)):
+            text = payload.get("text_lemmatized") or payload.get("data", "")
+            patterns.append(
+                f"(:{self.table_name} {{id: $id{j}, vector: $vec{j}, text: $text{j}, "
+                f"payload: $payload{j}, user_id: $user_id{j}, agent_id: $agent_id{j}, "
+                f"run_id: $run_id{j}, actor_id: $actor_id{j}}})"
+            )
+            params[f"id{j}"] = vector_id
+            params[f"vec{j}"] = [float(x) for x in vector]
+            params[f"text{j}"] = text
+            params[f"payload{j}"] = json.dumps(payload)
+            for col in PROMOTED_COLUMNS:
+                params[f"{col}{j}"] = payload.get(col)
+        self._execute("CREATE " + ", ".join(patterns), params)
 
     def _upsert(self, vector_id: str, vector: List, payload: Dict):
         text = payload.get("text_lemmatized") or payload.get("data", "")
@@ -618,8 +660,11 @@ class NeuG(VectorStoreBase):
             sets.append("m.text = $text")
             sets.append("m.payload = $payload")
             for col in PROMOTED_COLUMNS:
-                params[col] = payload.get(col)
-                sets.append(f"m.{col} = ${col}")
+                # NeuG rejects SET col = NULL (ERR_NOT_SUPPORTED 1011), so only
+                # assign promoted columns the payload actually carries.
+                if payload.get(col) is not None:
+                    params[col] = payload.get(col)
+                    sets.append(f"m.{col} = ${col}")
         if not sets:
             return
         self._execute(

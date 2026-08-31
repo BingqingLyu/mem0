@@ -26,7 +26,10 @@ class FakeConnection:
         self._schema_tables = schema_tables or []
         self.next_result = None
         self.result_queue = []  # FIFO of canned results (consumed before next_result)
-        self.fail_next_create = None
+        # Fail the N-th statement starting with "CREATE (:" (0-based, across
+        # batched and replayed writes) with the given error message.
+        self.fail_create_indexes = {}
+        self._create_calls = 0
 
     def execute(self, query, access_mode="", parameters=None):
         self.calls.append((query, parameters))
@@ -34,10 +37,11 @@ class FakeConnection:
             prefix = self.fail_query_prefix
             self.fail_query_prefix = None
             raise RuntimeError(f"forced failure on {prefix.strip()}")
-        if self.fail_next_create is not None and query.startswith("CREATE (:"):
-            error = self.fail_next_create
-            self.fail_next_create = None
-            raise RuntimeError(error)
+        if query.startswith("CREATE (:"):
+            index = self._create_calls
+            self._create_calls += 1
+            if index in self.fail_create_indexes:
+                raise RuntimeError(self.fail_create_indexes[index])
         if self.result_queue:
             return self.result_queue.pop(0)
         if self.next_result is not None:
@@ -131,27 +135,45 @@ def test_insert_builds_create_with_params(neug_store):
     payload = {"data": "hello world", "user_id": "u1", "hash": "h1"}
     neug_store.insert([[0.1, 0.2, 0.3, 0.4]], payloads=[payload], ids=["m1"])
     query, params = _last_call(neug_store)
+    # Batched write: one multi-row CREATE with per-row suffixed parameters.
     assert query.startswith("CREATE (:test_col")
-    assert params["id"] == "m1"
-    assert params["vec"] == [0.1, 0.2, 0.3, 0.4]
-    assert params["text"] == "hello world"
-    assert json.loads(params["payload"]) == payload
-    assert params["user_id"] == "u1"
-    assert params["agent_id"] is None
+    assert params["id0"] == "m1"
+    assert params["vec0"] == [0.1, 0.2, 0.3, 0.4]
+    assert params["text0"] == "hello world"
+    assert json.loads(params["payload0"]) == payload
+    assert params["user_id0"] == "u1"
+    assert params["agent_id0"] is None
+
+
+def test_insert_batches_rows_into_multi_row_creates(neug_store):
+    from mem0.vector_stores import neug as neug_mod
+
+    n = neug_mod._INSERT_BATCH_SIZE + 3  # two full/partial batches
+    neug_store.insert(
+        [[0.1, 0.2, 0.3, 0.4]] * n,
+        payloads=[{"data": f"d{i}"} for i in range(n)],
+        ids=[f"m{i}" for i in range(n)],
+    )
+    creates = [(q, p) for q, p in neug_store._conn.calls if q.startswith("CREATE (")]
+    assert len(creates) == 2
+    assert creates[0][1]["id0"] == "m0"
+    assert creates[0][1][f"id{neug_mod._INSERT_BATCH_SIZE - 1}"] == f"m{neug_mod._INSERT_BATCH_SIZE - 1}"
+    assert creates[1][1]["id0"] == f"m{neug_mod._INSERT_BATCH_SIZE}"
+    assert creates[1][1]["id2"] == f"m{n - 1}"
 
 
 def test_insert_prefers_text_lemmatized(neug_store):
     payload = {"data": "raw text", "text_lemmatized": "lemmatized text"}
     neug_store.insert([[0.0, 0.0, 0.0, 0.0]], payloads=[payload], ids=["m1"])
     _, params = _last_call(neug_store)
-    assert params["text"] == "lemmatized text"
+    assert params["text0"] == "lemmatized text"
 
 
 def test_insert_without_payloads_or_ids(neug_store):
     neug_store.insert([[0.1, 0.2, 0.3, 0.4]])
     _, params = _last_call(neug_store)
-    assert params["payload"] == "{}"
-    assert params["id"]  # auto-generated uuid
+    assert params["payload0"] == "{}"
+    assert params["id0"]  # auto-generated uuid
 
 
 def test_insert_validates_lengths(neug_store):
@@ -162,21 +184,36 @@ def test_insert_validates_lengths(neug_store):
 
 
 def test_insert_duplicate_falls_back_to_set_and_verifies(neug_store):
-    neug_store._conn.fail_next_create = "Error code: 1009, primary key conflict"
-    # The post-SET verification `get` must see the row, otherwise raise:
-    # queue an empty result for the SET statement, then the row for get().
+    # CREATE #0 is the batch (fails, rolls back atomically); the replay then
+    # succeeds for m1 (#1) and hits the conflict again for m2 (#2), which
+    # falls back to SET. Every successful statement consumes one queued
+    # result, so queue one for the m1 replay, the SET, and the verification.
+    neug_store._conn.fail_create_indexes = {
+        0: "Error code: 1009, primary key conflict",
+        2: "Error code: 1009, primary key conflict",
+    }
     neug_store._conn.result_queue = [
+        FakeQueryResult(),  # replayed CREATE for m1 succeeds
         FakeQueryResult(),  # SET returns no rows
-        FakeQueryResult([{"id": "m1", "payload": "{}"}]),  # verification get
+        FakeQueryResult([{"id": "m2", "payload": "{}"}]),  # verification get
     ]
-    neug_store.insert([[0.1, 0.2, 0.3, 0.4]], payloads=[{"data": "dup"}], ids=["m1"])
+    neug_store.insert(
+        [[0.1, 0.2, 0.3, 0.4]] * 2,
+        payloads=[{"data": "a"}, {"data": "dup"}],
+        ids=["m1", "m2"],
+    )
     queries = [q for q, _ in neug_store._conn.calls]
     assert any("SET" in q for q in queries)
 
 
 def test_insert_duplicate_fallback_raises_when_row_missing(neug_store):
-    neug_store._conn.fail_next_create = "Error code: 1009, primary key conflict"
-    # Verification `get` finds nothing -> the original error must propagate.
+    # Batch CREATE (#0) fails, the replayed single-row CREATE (#1) hits the
+    # conflict again, and the verification `get` finds nothing -> the
+    # original error must propagate.
+    neug_store._conn.fail_create_indexes = {
+        0: "Error code: 1009, primary key conflict",
+        1: "Error code: 1009, primary key conflict",
+    }
     with pytest.raises(RuntimeError, match="1009"):
         neug_store.insert([[0.1, 0.2, 0.3, 0.4]], payloads=[{"data": "dup"}], ids=["m1"])
 
@@ -320,6 +357,16 @@ def test_update_payload_only(neug_store):
     query, _ = _last_call(neug_store)
     assert "m.vector" not in query
     assert "m.payload = $payload" in query
+
+
+def test_update_skips_null_promoted_columns(neug_store):
+    # NeuG rejects SET col = NULL (error 1011): promoted columns absent from
+    # the payload must be omitted from the SET, not bound as NULL.
+    neug_store.update("m1", payload={"data": "x", "user_id": "u1"})
+    query, params = _last_call(neug_store)
+    assert "m.user_id = $user_id" in query
+    assert "m.agent_id" not in query
+    assert "agent_id" not in params
 
 
 def test_update_noop_without_args(neug_store):
