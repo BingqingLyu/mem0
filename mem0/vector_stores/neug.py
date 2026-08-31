@@ -491,19 +491,18 @@ class NeuG(VectorStoreBase):
         """Search for similar vectors.
 
         The default path is the HNSW IndexScan plan (ORDER BY distance ASC
-        LIMIT) with over-fetching; similarity is recomputed client-side from
-        the returned stored vectors, which fixes the engine's misreported
-        distances for duplicate vectors and re-ranks around its stale index
-        ordering after vector updates. ``ann`` is accepted for compatibility
-        (ANN is now the default); pass ``exact=True`` to force an O(n) full
-        scan that ranks correctly regardless of index staleness.
+        LIMIT) with a bound ``$q`` query vector; similarity is recomputed
+        client-side from the returned stored vectors, which guarantees mem0's
+        [0, 1] score contract and masks alibaba/neug#931 (the ANN rewrite path
+        can project a raw index score instead of the metric distance).
+        ``ann`` is accepted for compatibility (ANN is the default); pass
+        ``exact=True`` to force an O(n) full scan.
         """
         where, params, client_filters, match_nothing = self._build_server_filters(filters)
         if match_nothing:
             return []
         query_vec = [float(x) for x in vectors]
         similarity = self._similarity_fn()
-        needs_refetch = bool(client_filters) or bool(where)
 
         if exact:
             # Full scan: no ORDER BY/LIMIT (an unordered scan truncates rows
@@ -514,10 +513,13 @@ class NeuG(VectorStoreBase):
             )
             exec_params = params or None
         else:
-            # ANN IndexScan path. Bound $q works on this plan; over-fetch when
-            # filters are involved because the index scan applies them while
-            # truncating at LIMIT.
-            fetch_k = max(top_k * _OVERFETCH_FACTOR, _OVERFETCH_MIN) if needs_refetch else top_k
+            # ANN IndexScan path. Bound $q works on this plan. Over-fetch only
+            # when rows may be dropped client-side: with purely server-side
+            # filters the engine applies them during the traversal, and a
+            # LIMIT-sized pool re-ranks identically to a larger one (verified
+            # at benchmark scale), so skip transferring vectors that would be
+            # discarded anyway.
+            fetch_k = max(top_k * _OVERFETCH_FACTOR, _OVERFETCH_MIN) if client_filters else top_k
             params["q"] = query_vec
             query_sql = (
                 f"MATCH (m:{self.table_name}){where} "

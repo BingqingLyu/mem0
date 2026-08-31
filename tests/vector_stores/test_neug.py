@@ -197,15 +197,15 @@ def test_search_default_is_ann_index_scan(neug_store):
     assert results[0].payload["data"] == "hi"
 
 
-def test_search_overfetches_when_filters_present(neug_store):
+def test_search_overfetches_only_for_client_filters(neug_store):
     neug_store.search("q", [0.0, 0.0, 0.0, 0.0], top_k=3, filters={"custom": "y"})
     query, _ = _last_call(neug_store)
-    assert "LIMIT 50" in query  # client filters force over-fetch on the ANN path
+    assert "LIMIT 50" in query  # client filters may drop rows, so widen the pool
 
     neug_store._conn.calls.clear()
     neug_store.search("q", [0.0, 0.0, 0.0, 0.0], top_k=3, filters={"user_id": "u1"})
     query, _ = _last_call(neug_store)
-    assert "LIMIT 50" in query  # server filters over-fetch too (index scan truncates)
+    assert "LIMIT 3" in query  # server-side filters need no over-fetch
 
 
 def test_search_exact_uses_full_scan(neug_store):
