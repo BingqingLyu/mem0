@@ -183,17 +183,19 @@ def test_insert_duplicate_fallback_raises_when_row_missing(neug_store):
 
 def test_search_default_is_ann_index_scan(neug_store):
     neug_store._conn.next_result = FakeQueryResult(
-        [{"id": "m1", "payload": json.dumps({"data": "hi", "user_id": "u1"}), "vector": [0.1, 0.2, 0.3, 0.4]}]
+        [{"id": "m1", "payload": json.dumps({"data": "hi", "user_id": "u1"}), "d": 0.0}]
     )
     results = neug_store.search("hi", [0.1, 0.2, 0.3, 0.4], top_k=3)
     query, params = _last_call(neug_store)
-    # Default path: HNSW IndexScan with bound query vector.
-    assert "ORDER BY vector_distance_cosine(m.vector, $q) ASC LIMIT 3" in query
-    assert "m.vector AS vector" in query
+    # Default path: HNSW IndexScan with bound query vector; the engine projects
+    # the distance, no stored-vector transfer.
+    assert "vector_distance_cosine(m.vector, $q) AS d" in query
+    assert "ORDER BY d ASC LIMIT 3" in query
+    assert "m.vector AS vector" not in query
     assert params["q"] == [0.1, 0.2, 0.3, 0.4]
     assert len(results) == 1
     assert results[0].id == "m1"
-    assert results[0].score == pytest.approx(1.0)  # client-recomputed
+    assert results[0].score == pytest.approx(1.0)  # 1 - engine distance
     assert results[0].payload["data"] == "hi"
 
 
@@ -221,19 +223,19 @@ def test_search_exact_uses_full_scan(neug_store):
     assert params == {"user_id": "u1"}
 
 
-def test_search_score_ignores_engine_dist_value(neug_store):
-    # Engine dist values are unreliable for duplicate vectors; scores must come
-    # from the client-side recompute over returned stored vectors.
+def test_search_score_comes_from_engine_distance(neug_store):
+    # Since alibaba/neug#931 is fixed (5300cb3), ANN scores derive from the
+    # engine-projected distance: cosine similarity = 1 - distance.
     neug_store._conn.next_result = FakeQueryResult(
         [
-            {"id": "m1", "payload": "{}", "vector": [-1.0, -1.0]},
-            {"id": "m2", "payload": "{}", "vector": [1.0, 0.0]},
+            {"id": "m1", "payload": "{}", "d": 0.3},
+            {"id": "m2", "payload": "{}", "d": 0.0},
         ]
     )
     results = neug_store.search("q", [-1.0, -1.0], top_k=2)
-    assert [r.id for r in results] == ["m1", "m2"]  # re-sorted by true similarity
+    assert [r.id for r in results] == ["m2", "m1"]  # sorted by similarity desc
     assert results[0].score == pytest.approx(1.0)
-    assert results[1].score == pytest.approx(0.0)
+    assert results[1].score == pytest.approx(0.7)
 
 
 def test_search_l2_missing_vector_scores_zero():
@@ -247,8 +249,8 @@ def test_search_l2_missing_vector_scores_zero():
 def test_search_applies_client_filters(neug_store):
     neug_store._conn.next_result = FakeQueryResult(
         [
-            {"id": "m1", "payload": json.dumps({"data": "a", "custom": "x"}), "vector": [1.0, 0.0]},
-            {"id": "m2", "payload": json.dumps({"data": "b", "custom": "y"}), "vector": [0.9, 0.1]},
+            {"id": "m1", "payload": json.dumps({"data": "a", "custom": "x"}), "d": 0.1},
+            {"id": "m2", "payload": json.dumps({"data": "b", "custom": "y"}), "d": 0.2},
         ]
     )
     results = neug_store.search("q", [0.0, 0.0, 0.0, 0.0], top_k=1, filters={"custom": "y"})

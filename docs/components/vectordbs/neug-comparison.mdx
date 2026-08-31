@@ -59,11 +59,11 @@ Takeaways:
 
 | Aspect | NeuG | Existing backends |
 | --- | --- | --- |
-| Query path | HNSW IndexScan with over-fetch + client-side re-rank (exact scores) | HNSW on Qdrant/pgvector; scores returned server-side |
+| Query path | HNSW IndexScan; metric distance projected server-side, converted to exact [0, 1] scores | HNSW on Qdrant/pgvector; scores returned server-side |
 | Network overhead | None — in-process calls, lowest latency for single-node setups | Client-server backends pay a network round-trip per query |
 | Writes | Local, no server bottleneck | Bound by server capacity and connection pools |
 | Concurrency | Single read-write connection serialized in-process (write-heavy concurrency is the current weak spot) | Server-based backends scale horizontally with many connections |
-| Index freshness | Updates are reflected in HNSW ranking; client-side re-rank keeps returned scores exact against mem0's [0, 1] contract, `exact=True` forces a full scan | Updates generally visible immediately |
+| Index freshness | Updates are reflected in HNSW ranking and in the projected distances (verified on NeuG main @ 5300cb3); `exact=True` forces a full scan | Updates generally visible immediately |
 
 ## When to pick NeuG
 

@@ -18,7 +18,7 @@ NeuG node table plus one relation table:
 - Graph traversal uses the relation table (``add_edge``/``remove_edge``/
   ``traverse``); ``delete``/``reset`` clean edges via DETACH DELETE / DROP.
 
-Dialect notes (verified against NeuG main @ 01d88ef, previously c9a77f51):
+Dialect notes (verified against NeuG main @ 5300cb3, previously 01d88ef):
 - ``vector_search`` / ``fts`` extensions must be LOADed per connection.
 - ``conn.execute`` takes ``parameters`` as a keyword dict.
 - ``IN $list`` bound parameters and bound ``LIMIT`` are not usable, so IN is
@@ -29,12 +29,11 @@ Dialect notes (verified against NeuG main @ 01d88ef, previously c9a77f51):
 - The engine allows duplicate edges between the same node pair, so
   ``add_edge`` checks for an existing edge first.
 - Performance: ``search`` uses the HNSW IndexScan plan (ORDER BY distance ASC
-  LIMIT) with a bound ``$q`` query vector and over-fetching, then re-ranks
-  client-side from the returned stored vectors. This is the fast ANN path; it
-  also masks an upstream defect (alibaba/neug#931): on the ANN rewrite path
-  the projected distance can be a raw index score instead of the metric's
-  distance, so client-side re-ranking is what guarantees mem0's [0, 1]
-  similarity contract. Pass ``exact=True`` to force an O(n) full scan.
+  LIMIT) with a bound ``$q`` query vector and projects the metric distance
+  directly. Since 5300cb3 (alibaba/neug#968, closing alibaba/neug#931) the
+  ANN rewrite path reports true distances — including rows updated via SET —
+  so no vector transfer or client-side re-ranking is needed on this path.
+  Pass ``exact=True`` to force an O(n) full scan.
 - A NeuG database directory can only be opened once per process (error 1004)
   and only supports ONE read-write connection per Database (error 4001), so
   stores on the same ``db_path`` share one Database handle and one connection
@@ -170,6 +169,22 @@ def _is_duplicate_pk_error(error: Exception) -> bool:
     """Detect NeuG primary-key conflict errors (code 1009)."""
     message = str(error).lower()
     return "primary key" in message or "error code: 1009" in message or "code: 1009" in message
+
+
+def _score_from_distance(metric: str, dist: Any) -> float:
+    """Convert an engine-reported distance into mem0's [0, 1] similarity.
+
+    ``vector_distance_cosine`` returns 1 - cosine similarity and
+    ``vector_distance_l2`` returns the SQUARED L2 distance (verified on
+    NeuG main @ 5300cb3).
+    """
+    try:
+        d = float(dist)
+    except (TypeError, ValueError):
+        return 0.0
+    if metric.endswith("cosine"):
+        return max(0.0, min(1.0, 1.0 - d))
+    return 1.0 / (1.0 + math.sqrt(max(0.0, d)))
 
 
 class NeuG(VectorStoreBase):
@@ -491,12 +506,12 @@ class NeuG(VectorStoreBase):
         """Search for similar vectors.
 
         The default path is the HNSW IndexScan plan (ORDER BY distance ASC
-        LIMIT) with a bound ``$q`` query vector; similarity is recomputed
-        client-side from the returned stored vectors, which guarantees mem0's
-        [0, 1] score contract and masks alibaba/neug#931 (the ANN rewrite path
-        can project a raw index score instead of the metric distance).
-        ``ann`` is accepted for compatibility (ANN is the default); pass
-        ``exact=True`` to force an O(n) full scan.
+        LIMIT) with a bound ``$q`` query vector; the engine projects the
+        metric distance, which the adapter converts to mem0's [0, 1]
+        similarity contract (verified on NeuG main @ 5300cb3, where the
+        former alibaba/neug#931 raw-score defect is fixed). ``ann`` is
+        accepted for compatibility (ANN is the default); pass ``exact=True``
+        to force an O(n) full scan ranked client-side.
         """
         where, params, client_filters, match_nothing = self._build_server_filters(filters)
         if match_nothing:
@@ -523,20 +538,31 @@ class NeuG(VectorStoreBase):
             params["q"] = query_vec
             query_sql = (
                 f"MATCH (m:{self.table_name}){where} "
-                "RETURN m.id AS id, m.payload AS payload, m.vector AS vector "
-                f"ORDER BY {self._distance_func}(m.vector, $q) ASC LIMIT {int(fetch_k)}"
+                "RETURN m.id AS id, m.payload AS payload, "
+                f"{self._distance_func}(m.vector, $q) AS d "
+                f"ORDER BY d ASC LIMIT {int(fetch_k)}"
             )
             exec_params = params
 
         rows = self._execute(query_sql, exec_params)
-        results = [
-            NeuGOutput(
-                id=row["id"],
-                score=similarity([float(x) for x in row.get("vector") or []], query_vec),
-                payload=self._parse_payload(row.get("payload")),
-            )
-            for row in rows
-        ]
+        if exact:
+            results = [
+                NeuGOutput(
+                    id=row["id"],
+                    score=similarity([float(x) for x in row.get("vector") or []], query_vec),
+                    payload=self._parse_payload(row.get("payload")),
+                )
+                for row in rows
+            ]
+        else:
+            results = [
+                NeuGOutput(
+                    id=row["id"],
+                    score=_score_from_distance(self._metric, row.get("d")),
+                    payload=self._parse_payload(row.get("payload")),
+                )
+                for row in rows
+            ]
         if client_filters:
             results = [r for r in results if self._matches_client_filters(r.payload, client_filters)]
         results.sort(key=lambda r: r.score, reverse=True)
