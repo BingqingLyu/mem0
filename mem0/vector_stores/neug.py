@@ -193,6 +193,20 @@ def _score_from_distance(metric: str, dist: Any) -> float:
     return 1.0 / (1.0 + math.sqrt(max(0.0, d)))
 
 
+def _sanitize_fts_query(query: str) -> str:
+    """Quote each whitespace token so NeuG FTS (SQLite FTS5) parses it literally.
+
+    An unquoted token containing a hyphen (e.g. ``dutch-made``) is parsed as a
+    column expression by FTS5 and fails with ``no such column``, which used to
+    abort the whole keyword channel (verified on NeuG main @ 5300cb3).
+    Per-token quoting keeps the AND semantics of multi-token queries.
+    """
+    tokens = query.split()
+    if not tokens:
+        return ""
+    return " ".join('"{}"'.format(t.replace('"', '""')) for t in tokens)
+
+
 class NeuG(VectorStoreBase):
     def __init__(
         self,
@@ -619,11 +633,14 @@ class NeuG(VectorStoreBase):
         """
         if not query:
             return None
+        fts_query = _sanitize_fts_query(query)
+        if not fts_query:
+            return None
         where, params, client_filters, match_nothing = self._build_server_filters(filters)
         if match_nothing:
             return []
         fetch_k = max(top_k * _OVERFETCH_FACTOR, _OVERFETCH_MIN) if client_filters else top_k
-        params["q"] = query
+        params["q"] = fts_query
         try:
             rows = self._execute(
                 f"MATCH (m:{self.table_name}){where} "

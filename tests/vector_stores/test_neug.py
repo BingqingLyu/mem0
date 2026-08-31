@@ -329,8 +329,26 @@ def test_keyword_search_negates_bm25_score(neug_store):
     query, params = _last_call(neug_store)
     assert "bm25(m.text, $q)" in query
     assert "ORDER BY score ASC LIMIT 5" in query
-    assert params["q"] == "hello"
+    assert params["q"] == '"hello"'
     assert results[0].score == pytest.approx(3.5)
+
+
+def test_keyword_search_quotes_tokens_for_fts(neug_store):
+    # Unquoted hyphenated tokens make NeuG FTS (SQLite FTS5) raise "no such
+    # column"; per-token quoting keeps them literal and preserves AND semantics.
+    neug_store._conn.next_result = FakeQueryResult([])
+    neug_store.keyword_search("dutch-made aerolatte", top_k=5)
+    _, params = _last_call(neug_store)
+    assert params["q"] == '"dutch-made" "aerolatte"'
+
+    neug_store.keyword_search('say "hi" there', top_k=5)
+    _, params = _last_call(neug_store)
+    assert params["q"] == '"say" """hi""" "there"'
+
+
+def test_keyword_search_whitespace_only_query_returns_none(neug_store):
+    assert neug_store.keyword_search("   ", top_k=5) is None
+    assert neug_store._conn.calls == []
 
 
 def test_keyword_search_empty_query_returns_none(neug_store):

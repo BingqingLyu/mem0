@@ -115,6 +115,21 @@ def test_keyword_search_bm25(seeded_store):
     assert scores == sorted(scores, reverse=True)
 
 
+def test_keyword_search_hyphenated_tokens(seeded_store):
+    # Regression: an unquoted hyphenated token made NeuG FTS (SQLite FTS5)
+    # raise "no such column" and keyword_search return None. The adapter must
+    # quote tokens so such queries hit instead of aborting.
+    seeded_store.insert(
+        [_vec(1)],
+        payloads=[{"data": "self-hosted graph-database benchmark runs end-to-end", "user_id": "alice"}],
+        ids=["smoke-hyphen"],
+    )
+    results = seeded_store.keyword_search("graph-database self-hosted", top_k=5)
+    assert results is not None
+    assert any(r.id == "smoke-hyphen" for r in results)
+    seeded_store.delete("smoke-hyphen")  # module-scoped store: keep row counts stable
+
+
 def test_list_with_filters_returns_wrapped_shape(seeded_store):
     alice = seeded_store.list(filters={"user_id": "alice"}, top_k=100)
     assert isinstance(alice, list) and len(alice) == 1  # mem0 wrapped [[...]] shape
